@@ -127,29 +127,30 @@ class PDE(object):
         self.object_values = []
 
         def eval_cb(j, m):
-            print("Objective is {}".format(j))
+            # print(f"Parameter is {np.array(m.vector())}")
+            print(f"Objective is {j}")
             self.object_values.append(j)
  
         control = da.Control(self.h)
-        reduced_functional = da.ReducedFunctional(self.J, control, eval_cb_post=eval_cb)
+        Jhat = reduced_functional = da.ReducedFunctional(self.J, control, eval_cb_post=eval_cb)
 
         vtkfile_u_opt = fe.File(f'data/pvd/{self.case_name}/u_opt.pvd')
         vtkfile_d_opt = fe.File(f'data/pvd/{self.case_name}/d_opt.pvd')
-        vtkfile_E = fe.File(f'data/pvd/{self.case_name}/E.pvd')
-
+        vtkfile_mesh = fe.File(f'data/pvd/{self.case_name}/mesh.pvd')
 
         def save_parameter(x):
+            # vtkfile_mesh << self.mesh
+            # print("callback, assign values to mesh")
             pass
-            # self.E.vector()[:] = x
-            # vtkfile_E << self.E
-            # print("callback, assign values to E")
 
-        da.minimize(reduced_functional, method="L-BFGS-B", tol=1e-20,  callback=save_parameter,
-            options={"disp": True, "maxiter": 50})
+        h_opt = da.minimize(reduced_functional, method="L-BFGS-B", tol=1e-20,  callback=save_parameter,
+            options={"disp": True, "maxiter": 30})
 
+
+        s = self.mesh_deformation(h_opt)
+        fe.ALE.move(self.mesh, s)
         self.d_new.vector()[:] = 0
         self.x_new.vector()[:] = 0
-
         for i, (disp, rp) in enumerate(zip(self.displacements, self.relaxation_parameters)):
             self.presLoad.t = disp
             self.solver_d.solve()
@@ -159,7 +160,16 @@ class PDE(object):
 
         print(self.object_values)
 
-        self.show_optimization_progress()
+        plt.figure()
+        Jhat(self.h)
+        initial, _ = fe.plot(self.mesh, color="b", linewidth=0.25, label="Initial mesh")
+        Jhat(h_opt)
+        optimal, _ = fe.plot(self.mesh, color="r", linewidth=0.25, label="Optimal mesh")
+        plt.legend(handles=[initial, optimal])
+        plt.axis("off")
+        plt.show()
+
+        # self.show_optimization_progress()
 
         # self.show_force_displacement()
         # plt.ioff()
@@ -278,61 +288,71 @@ class TestCase(PDE):
         b_mesh = da.BoundaryMesh(self.mesh, "exterior")
         S_b = fe.VectorFunctionSpace(b_mesh, "CG", 1)
         self.h = da.Function(S_b, name="h")
+        self.h.vector()[:] = 1e1
 
-        # self.h.vector()[:] = 1e1
+
+        vtkfile_mesh = fe.File(f'data/pvd/{self.case_name}/mesh.pvd')
+        vtkfile_mesh << self.mesh
+
+
+        s = self.mesh_deformation(self.h)
+        fe.ALE.move(self.mesh, s)
+
+
+        vtkfile_mesh << self.mesh
+        fe.ALE.move(self.mesh, s)
+        vtkfile_mesh << self.mesh
+
+        exit()
+
+
+    def mesh_deformation(self, h):
 
         zero = da.Constant([0.] * self.mesh.geometric_dimension())
 
         S = fe.VectorFunctionSpace(self.mesh, "CG", 1)
         s = da.Function(S, name="Mesh perturbation field")
-        self.h_V = da.transfer_from_boundary(self.h, self.mesh)
-        self.h_V.rename("Volume extension of h", "")
+        h_V = da.transfer_from_boundary(h, self.mesh)
+        h_V.rename("Volume extension of h", "")
 
-        def mesh_deformation():
-            # Compute variable :math:`\mu`
-            V = fe.FunctionSpace(self.mesh, "CG", 1)
-            u, v = fe.TrialFunction(V), fe.TestFunction(V)
+        # Compute variable :math:`\mu`
+        V = fe.FunctionSpace(self.mesh, "CG", 1)
+        u, v = fe.TrialFunction(V), fe.TestFunction(V)
 
-            a = -fe.inner(fe.grad(u), fe.grad(v)) * fe.dx
-            l = da.Constant(0.) * v * fe.dx
+        a = -fe.inner(fe.grad(u), fe.grad(v)) * fe.dx
+        l = da.Constant(0.) * v * fe.dx
 
-            mu_min = da.Constant(1., name="mu_min")
-            mu_max = da.Constant(500, name="mu_max")
-            bcs = []
-            for side in [self.lower, self.upper, self.left, self.right]:
-                bcs.append(da.DirichletBC(V, mu_min, side))
-            bcs.append(da.DirichletBC(V, mu_max, self.hole))
+        mu_min = da.Constant(1., name="mu_min")
+        mu_max = da.Constant(500, name="mu_max")
+        bcs = []
+        for side in [self.lower, self.upper, self.left, self.right]:
+            bcs.append(da.DirichletBC(V, mu_min, side))
+        bcs.append(da.DirichletBC(V, mu_max, self.hole))
 
-            mu = da.Function(V, name="mesh deformation mu")
-            da.solve(a == l, mu, bcs=bcs)
+        mu = da.Function(V, name="mesh deformation mu")
+        da.solve(a == l, mu, bcs=bcs)
 
-            # Compute the mesh deformation
-            S = fe.VectorFunctionSpace(self.mesh, "CG", 1)
-            u, v = fe.TrialFunction(S), fe.TestFunction(S)
+        # Compute the mesh deformation
+        S = fe.VectorFunctionSpace(self.mesh, "CG", 1)
+        u, v = fe.TrialFunction(S), fe.TestFunction(S)
 
-            def epsilon(u):
-                return fe.sym(fe.grad(u))
+        def epsilon(u):
+            return fe.sym(fe.grad(u))
 
-            def sigma(u, mu=500, lmb=0):
-                return 2 * mu * epsilon(u) + lmb * fe.tr(epsilon(u)) * fe.Identity(2)
+        def sigma(u, mu=500, lmb=0):
+            return 2 * mu * epsilon(u) + lmb * fe.tr(epsilon(u)) * fe.Identity(2)
 
-            a = fe.inner(sigma(u, mu=mu), fe.grad(v)) * fe.dx
-            L = fe.inner(self.h_V, v) * self.ds(2)
+        a = fe.inner(sigma(u, mu=mu), fe.grad(v)) * fe.dx
+        L = fe.inner(h_V, v) * self.ds(2)
 
-            bcs = []
-            for side in [self.lower, self.upper, self.left, self.right]:
-                bcs.append(da.DirichletBC(S, zero, side))
+        bcs = []
+        for side in [self.lower, self.upper, self.left, self.right]:
+            bcs.append(da.DirichletBC(S, zero, side))
 
-            s = da.Function(S, name="mesh deformation")
-            da.solve(a == L, s, bcs=bcs)
+        s = da.Function(S, name="mesh deformation")
+        da.solve(a == L, s, bcs=bcs)
 
-            return s
-
-        s = mesh_deformation()
-        fe.ALE.move(self.mesh, s)
-
-        vtkfile_mesh = fe.File(f'data/pvd/{self.case_name}/mesh.pvd')
-        vtkfile_mesh << self.mesh
+        return s
 
 
     def set_bcs_staggered(self):
