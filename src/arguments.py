@@ -15,7 +15,7 @@ parser.add_argument(
         '--verbose',
         help='Verbose for debug',
         action='store_true',
-        default=True)
+        default=False)
 
 
 args = parser.parse_args()
@@ -27,7 +27,7 @@ else:
 
 
 plt.rcParams.update({
-	"text.latex.preamble": r"\usepackage{amsmath}",
+    "text.latex.preamble": r"\usepackage{amsmath}",
     "text.usetex": True,
     "font.family": "sans-serif",
     "font.sans-serif": ["Helvetica"]})
