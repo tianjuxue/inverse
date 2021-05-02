@@ -42,6 +42,11 @@ class PDE(object):
             self.opt_step = opt_step
             self.build_mesh(f'data/xml/{self.case_name}/inverse/mesh_{self.opt_step}.xml')
             self.staggered_solve()
+        elif self.problem == 'post-processing':
+            self.opt_step = opt_step
+            self.plot_force_displacement()
+            plt.ioff()
+            plt.show()
         else:
             raise ValueError('Unknown problem mode!')
 
@@ -191,8 +196,7 @@ class PDE(object):
         self.sigma_plus = cauchy_stress_plus(strain(fe.grad(self.x_new)), self.psi_plus)
         self.sigma_minus = cauchy_stress_minus(strain(fe.grad(self.x_new)), self.psi_minus)
 
-        self.H_old = self.psi_plus(strain(fe.grad(self.x_new)))
-        self.G_d = (self.H_old * self.zeta * g_d_prime(self.d_new, g_d) \
+        self.G_d = (self.history * self.zeta * g_d_prime(self.d_new, g_d) \
                     + self.G_c / self.l0 * (self.zeta * self.d_new + self.l0**2 * fe.inner(fe.grad(self.zeta), fe.grad(self.d_new)))) * fe.dx
 
         self.G_u = (g_d(self.d_new) * fe.inner(self.sigma_plus, strain(fe.grad(self.eta))) \
@@ -220,6 +224,7 @@ class PDE(object):
 
         self.x_new = da.Function(self.U, name="u")
         self.d_new = da.Function(self.W, name="d")
+        self.history = da.Function(self.V)
  
         self.build_weak_form_staggered()
         J_u = fe.derivative(self.G_u, self.x_new, del_x)
@@ -250,6 +255,9 @@ class PDE(object):
             # newton_prm['absolute_tolerance'] = 1e-8
             newton_prm['relaxation_parameter'] = rp
  
+            psi_plus = self.psi_plus(strain(fe.grad(self.x_new)))
+            self.history.assign(da.project(fe.conditional(fe.gt(psi_plus, self.history), psi_plus, self.history), self.V))
+
             self.solver_d.solve()
 
             self.solver_u.solve()
@@ -266,8 +274,8 @@ class PDE(object):
             self.delta_u_recorded.append(disp)
             self.sigma_recorded.append(force_upper)
 
-            if self.display_intermediate_results and i % 20 == 0:
-                self.show_force_displacement()
+            # if self.display_intermediate_results and i % 20 == 0:
+            #     self.plot_force_displacement()
 
         alpha = 1e1
         Vol = da.assemble(self.one * fe.dx(domain=self.mesh))
@@ -282,10 +290,6 @@ class PDE(object):
         if self.problem == 'forward':
             np.save(f'data/numpy/{self.case_name}/step_{self.opt_step}_u.npy', np.array(self.delta_u_recorded))
             np.save(f'data/numpy/{self.case_name}/step_{self.opt_step}_f.npy', np.array(self.sigma_recorded))
-
-        # self.show_force_displacement()
-        # plt.ioff()
-        # plt.show()
 
         return float(self.J)
 
@@ -367,7 +371,7 @@ class PDE(object):
         plt.pause(0.001)
 
 
-    def show_optimization_progress(self):
+    def plot_optimization_progress(self):
         fig = plt.figure()
         plt.plot(self.object_values[1:], linestyle='--', marker='o')
         plt.tick_params(labelsize=14)
@@ -376,31 +380,55 @@ class PDE(object):
         plt.show()
 
 
-    def show_force_displacement(self):
-        delta_u_recorded = np.absolute(np.array(self.delta_u_recorded))
-        sigma_recorded = np.absolute(np.array(self.sigma_recorded))
-        fig = plt.figure(0)
+    def plot_force_displacement(self):
+        delta_u_recorded = np.load(f'data/numpy/{self.case_name}/step_{self.opt_step}_u.npy')
+        sigma_recorded = np.load(f'data/numpy/{self.case_name}/step_{self.opt_step}_f.npy')
+        fig = plt.figure(num=self.opt_step)
         plt.ion()
-        plt.plot(delta_u_recorded, sigma_recorded, linestyle='--', marker='o', color='red', label='full')
+        plt.plot(delta_u_recorded, sigma_recorded, linestyle='--', marker='o', color='red')
         # plt.legend(fontsize=14)
         plt.tick_params(labelsize=14)
         plt.xlabel("Vertical displacement of top side", fontsize=14)
         plt.ylabel("Force on top side", fontsize=14)
         plt.grid(True)
-        # fig.savefig(f'data/pdf/{self.case_name}/force_load.pdf', bbox_inches='tight')
+        fig.savefig(f'data/pdf/{self.case_name}/step_{self.opt_step}_force_load.pdf', bbox_inches='tight')
         plt.show()
         plt.pause(0.001)
+
+
+def plot_comparison(case_name):
+    u_initial = np.load(f'data/numpy/{case_name}/step_0_u.npy')
+    f_initial = np.load(f'data/numpy/{case_name}/step_0_f.npy')
+    u_optimal = np.load(f'data/numpy/{case_name}/step_2_u.npy')
+    f_optimal = np.load(f'data/numpy/{case_name}/step_2_f.npy')
+
+    fig = plt.figure()
+    plt.plot(u_initial, f_initial, linestyle='--', marker='o', color='blue', label='initial')
+    plt.plot(u_optimal, f_optimal, linestyle='--', marker='o', color='red', label='optimized')
+    plt.legend(fontsize=14)
+    plt.tick_params(labelsize=14)
+    plt.xlabel("Vertical displacement of top side", fontsize=14)
+    plt.ylabel("Force on top side", fontsize=14)
+    plt.grid(True)
+    fig.savefig(f'data/pdf/{case_name}/cmp_force_load.pdf', bbox_inches='tight')
+    plt.show()
 
 
 def test(args):
     # pde = PDE('inverse')
     # pde.run()
 
-    for i in range(7):
-        pde = PDE('forward')
+    # for i in range(3):
+    #     pde = PDE('forward')
+    #     pde.run(i)
+
+    for i in range(3):
+        pde = PDE('post-processing')
         pde.run(i)
+
 
 
 if __name__ == '__main__':
     args = arguments.args
-    test(args)
+    # test(args)
+    plot_comparison('brittle')
