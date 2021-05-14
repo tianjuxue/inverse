@@ -4,6 +4,12 @@ import ufl
  
 
 # ---------------------------------------------------------------- 
+# History function
+def get_history(history, psi_plus):
+    return fe.conditional(fe.gt(history, psi_plus), history, psi_plus)
+    
+
+# ---------------------------------------------------------------- 
 # Degradation functions
 def g_d(d):
     degrad = (1 - d)**2;

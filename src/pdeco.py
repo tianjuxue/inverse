@@ -18,22 +18,20 @@ from .constitutive import *
 rank = MPI.COMM_WORLD.Get_rank()
 
 
-class PDE(object):
+class PDECO(object):
     def __init__(self, problem):
-        self.case_name = "brittle"
-        self.displacements = 1e-1*np.linspace(0, 0.1, 150)
-        self.relaxation_parameters =  np.linspace(1, 1, len(self.displacements))
-        # self.staggered_tol = 1e-5
-        # self.staggered_maxiter = 1000
-        self.delta_u_recorded = []
-        self.sigma_recorded = []     
+        self.staggered_tol = 1e-5
+        self.staggered_maxiter = 1000
+        self.solution_scheme = 'explicit'   
         self.problem = problem 
+        self.periodic = None
         self.preparation()
         
 
     def run(self, opt_step=0):
         if self.problem == 'inverse':
             self.build_mesh()
+            self.move_mesh()
             self.staggered_solve()
             self.adjoint_optimization()
         elif self.problem == 'forward':
@@ -60,73 +58,7 @@ class PDE(object):
             shutil.rmtree(f'data/xdmf/{self.case_name}/{self.problem}', ignore_errors=True)
 
 
-    def build_mesh(self, mesh_file=None): 
-        self.length = 1.
-        self.height = 1.
- 
-        radius = 0.2
-        self.xcenter = 0.5
-        self.ycenter = 0.5
-        plate = mshr.Rectangle(fe.Point(0., 0.), fe.Point(self.length, self.height))
-        circle = mshr.Circle(fe.Point(self.xcenter, self.ycenter), radius)
-        material_domain = plate - circle
-        self.mesh = mshr.generate_mesh(material_domain, 50)
-
-        if self.problem == 'forward' or self.problem == 'debug':
-            self.mesh = fe.Mesh()
-            xdmf_file_mesh = fe.XDMFFile(MPI.COMM_WORLD, mesh_file)
-            xdmf_file_mesh.read(self.mesh)
-            # self.mesh = fe.Mesh(mesh_file)
-
-        # Add dolfin-adjoint dependency
-        self.mesh  = create_overloaded_object(self.mesh)
-
-        # Defensive copy
-        self.mesh_initial = fe.Mesh(self.mesh)
-
-        length = self.length
-        height = self.height
-
-        class Lower(fe.SubDomain):
-            def inside(self, x, on_boundary):
-                return on_boundary and fe.near(x[1], 0)
-
-        class Upper(fe.SubDomain):
-            def inside(self, x, on_boundary):
-                return on_boundary and fe.near(x[1], height)
-
-        class Left(fe.SubDomain):
-            def inside(self, x, on_boundary):
-                return on_boundary and fe.near(x[0], 0)
-
-        class Right(fe.SubDomain):
-            def inside(self, x, on_boundary):                    
-                return on_boundary and fe.near(x[0], length)
-
-        class Corner(fe.SubDomain):
-            def inside(self, x, on_boundary):                    
-                return fe.near(x[0], 0) and fe.near(x[1], 0)
-
-        class Hole(fe.SubDomain):
-            def inside(self, x, on_boundary):                    
-                return on_boundary and x[0] > 0 and x[0] < length and x[1] > 0 and x[1] < height
-
-        self.lower = Lower()
-        self.upper = Upper()
-        self.corner = Corner()
-        self.left = Left()
-        self.right = Right()
-        self.hole = Hole()
-
-        self.boundaries = fe.MeshFunction("size_t", self.mesh, self.mesh.topology().dim() - 1)
-        self.boundaries.set_all(0)
-        self.upper.mark(self.boundaries, 1)
-        self.hole.mark(self.boundaries, 2)
-        self.ds = fe.Measure("ds")(subdomain_data=self.boundaries)
-
-        self.one = da.Constant(1.)
-        self.Vol0 = self.length * self.height - fe.assemble(self.one * fe.dx(domain=self.mesh))
-
+    def move_mesh(self):
         b_mesh = da.BoundaryMesh(self.mesh, "exterior")
         self.S_b = fe.VectorFunctionSpace(b_mesh, "CG", 1)
         self.h = da.Function(self.S_b, name="h")
@@ -158,13 +90,13 @@ class PDE(object):
         mu = da.Function(V, name="mesh deformation mu")
         da.solve(a == l, mu, bcs=bcs)
 
-        S = fe.VectorFunctionSpace(self.mesh, "CG", 1)
+        S = fe.VectorFunctionSpace(self.mesh, "CG", 1, constrained_domain=self.periodic)
         u, v = fe.TrialFunction(S), fe.TestFunction(S)
 
         def epsilon(u):
             return fe.sym(fe.grad(u))
 
-        def sigma(u, mu=500, lmb=0):
+        def sigma(u, mu=1., lmb=0.):
             return 2 * mu * epsilon(u) + lmb * fe.tr(epsilon(u)) * fe.Identity(2)
 
         a = fe.inner(sigma(u, mu=mu), fe.grad(v)) * fe.dx
@@ -180,26 +112,30 @@ class PDE(object):
         return s
 
 
-    def set_bcs_staggered(self):
-        self.presLoad = da.Expression("t", t=0.0, degree=1)
-        BC_u_lower = da.DirichletBC(self.U, da.Constant((0, 0)),  self.lower)
-        BC_u_upper = da.DirichletBC(self.U.sub(1), self.presLoad,  self.upper)
-        self.BC_u = [BC_u_lower, BC_u_upper]
-        self.BC_d = []
-
-
     def build_weak_form_staggered(self):
         self.psi = partial(psi_linear_elasticity, lamda=self.lamda, mu=self.mu)
-        self.psi_plus = partial(psi_plus_linear_elasticity_model_A, lamda=self.lamda, mu=self.mu)
-        self.psi_minus = partial(psi_minus_linear_elasticity_model_A, lamda=self.lamda, mu=self.mu)
- 
+
+        if self.i == 0:
+            self.psi_plus = partial(psi_plus_linear_elasticity_model_A, lamda=self.lamda, mu=self.mu)
+            self.psi_minus = partial(psi_minus_linear_elasticity_model_A, lamda=self.lamda, mu=self.mu)
+            print("use model A")
+        else:
+            self.psi_plus = partial(psi_plus_linear_elasticity_model_C, lamda=self.lamda, mu=self.mu)
+            self.psi_minus = partial(psi_minus_linear_elasticity_model_C, lamda=self.lamda, mu=self.mu)
+            print("use model C")
+
         self.sigma = cauchy_stress_plus(strain(fe.grad(self.x_new)), self.psi)
         self.sigma_plus = cauchy_stress_plus(strain(fe.grad(self.x_new)), self.psi_plus)
         self.sigma_minus = cauchy_stress_minus(strain(fe.grad(self.x_new)), self.psi_minus)
 
-        self.G_d = (self.history * self.zeta * g_d_prime(self.d_new, g_d) \
-                    + self.G_c / self.l0 * (self.zeta * self.d_new + self.l0**2 * fe.inner(fe.grad(self.zeta), fe.grad(self.d_new)))) * fe.dx
+        if self.solution_scheme == 'explicit':
+            history = self.history
+        else:
+            history = get_history(self.history, self.psi_plus(strain(fe.grad(self.x_new))))
 
+        self.G_d = (history * self.zeta * g_d_prime(self.d_new, g_d) \
+                    + self.G_c / self.l0 * (self.zeta * self.d_new + self.l0**2 * fe.inner(fe.grad(self.zeta), fe.grad(self.d_new)))) * fe.dx
+  
         self.G_u = (g_d(self.d_new) * fe.inner(self.sigma_plus, strain(fe.grad(self.eta))) \
             + fe.inner(self.sigma_minus, strain(fe.grad(self.eta)))) * fe.dx
 
@@ -208,14 +144,6 @@ class PDE(object):
         self.U = fe.VectorFunctionSpace(self.mesh, 'CG', 1)
         self.W = fe.FunctionSpace(self.mesh, 'CG', 1) 
         self.V = fe.FunctionSpace(self.mesh, 'DG', 0)
-       
-        self.E = 210
-        self.nu = 0.3
-        self.mu = self.E / (2 * (1 + self.nu))
-        self.lamda = (2. * self.mu * self.nu) / (1. - 2. * self.nu)
-
-        self.G_c = 2.7*1e-3
-        self.l0 = 0.02
 
         self.eta = fe.TestFunction(self.U)
         self.zeta = fe.TestFunction(self.W)
@@ -227,22 +155,19 @@ class PDE(object):
         self.d_new = da.Function(self.W, name="d")
         self.history = da.Function(self.V)
  
-        self.build_weak_form_staggered()
-        J_u = fe.derivative(self.G_u, self.x_new, del_x)
-        J_d = fe.derivative(self.G_d, self.d_new, del_d) 
-
-        self.set_bcs_staggered()
-        p_u = da.NonlinearVariationalProblem(self.G_u, self.x_new, self.BC_u, J_u)
-        p_d  = da.NonlinearVariationalProblem(self.G_d,  self.d_new, self.BC_d, J_d)
-        self.solver_u = da.NonlinearVariationalSolver(p_u)
-        self.solver_d  = da.NonlinearVariationalSolver(p_d)
+        x_old = fe.Function(self.U)
+        d_old = fe.Function(self.W) 
 
         if self.problem == 'forward' or self.problem == 'debug':
             xdmf_file_sols = fe.XDMFFile(MPI.COMM_WORLD, f'data/xdmf/{self.case_name}/{self.problem}/step_{self.opt_step}/sols.xdmf')
             xdmf_file_sols.parameters["functions_share_mesh"] = True
+            vtk_file_u = fe.File(f'data/pvd/{self.case_name}/{self.problem}/step_{self.opt_step}/u.pvd')
+            vtk_file_d = fe.File(f'data/pvd/{self.case_name}/{self.problem}/step_{self.opt_step}/d.pvd')
+
+        delta_u_recorded = []
+        sigma_recorded = []  
 
         self.J = 0
-
         for i, (disp, rp) in enumerate(zip(self.displacements, self.relaxation_parameters)):
             if rank == 0:
                 print('\n')
@@ -250,49 +175,73 @@ class PDE(object):
                 print(f'>> Step {i}, disp boundary condition = {disp} [mm]')
                 print('=================================================================================')
 
+            self.i = i
+            if self.i == 0 or self.i == 2:
+                self.build_weak_form_staggered()
+                J_u = fe.derivative(self.G_u, self.x_new, del_x)
+                J_d = fe.derivative(self.G_d, self.d_new, del_d)
+
+                self.set_bcs_staggered()
+                p_u = da.NonlinearVariationalProblem(self.G_u, self.x_new, self.BC_u, J_u)
+                p_d  = da.NonlinearVariationalProblem(self.G_d,  self.d_new, self.BC_d, J_d)
+                solver_u = da.NonlinearVariationalSolver(p_u)
+                solver_d  = da.NonlinearVariationalSolver(p_d)
+
             self.presLoad.t = disp
 
-            newton_prm = self.solver_u.parameters['newton_solver']
-            newton_prm['maximum_iterations'] = 100  
-            # newton_prm['absolute_tolerance'] = 1e-8
+            newton_prm = solver_u.parameters['newton_solver']
+            newton_prm['maximum_iterations'] = 100
             newton_prm['relaxation_parameter'] = rp
  
-            psi_plus = self.psi_plus(strain(fe.grad(self.x_new)))
+            self.history.assign(da.project(get_history(self.history, self.psi_plus(strain(fe.grad(self.x_new)))), self.V))
 
-            self.history.assign(da.project(fe.conditional(fe.gt(psi_plus, self.history), psi_plus, self.history), self.V))
-            # self.history.assign(da.project(psi_plus, self.V))
+            iteration = 0
+            err = 1.
+            while err > self.staggered_tol:
+                iteration += 1
 
-            self.solver_d.solve()
+                solver_d.solve()
+                solver_u.solve()
 
-            self.solver_u.solve()
+                if self.solution_scheme == 'explicit':
+                    break
 
-            # self.J += da.assemble(0.5 * self.d_new**2 * fe.dx)
-            self.J -= da.assemble(self.sigma[1, 1]*self.ds(1))
+                err_x = fe.errornorm(self.x_new, x_old, norm_type='l2')
+                err_d = fe.errornorm(self.d_new, d_old, norm_type='l2')
+                err = max(err_x, err_d) 
+
+                x_old.assign(self.x_new)
+                d_old.assign(self.d_new)
+
+                print('---------------------------------------------------------------------------------')
+                print(f'>> iteration. {iteration}, err_u = {err_x:.5}, err_d = {err_d:.5}, error = {err:.5}')
+                print('---------------------------------------------------------------------------------')
+
+                if err < self.staggered_tol or iteration >= self.staggered_maxiter:
+                    print('=================================================================================\n')
+                    break
 
             if self.problem == 'forward' or self.problem == 'debug':
                 xdmf_file_sols.write(self.x_new, i)
                 xdmf_file_sols.write(self.d_new, i)
+                vtk_file_u << self.x_new
+                vtk_file_d << self.d_new
 
-            force_upper = float(da.assemble(self.sigma[1, 1]*self.ds(1)))
+            force_upper = self.update_objective_in_the_loop()
             if rank == 0:
                 print(f"Force upper {force_upper}")
-            self.delta_u_recorded.append(disp)
-            self.sigma_recorded.append(force_upper)
 
+            delta_u_recorded.append(disp)
+            sigma_recorded.append(force_upper)
 
-        alpha = 1e2
-        Vol = da.assemble(self.one * fe.dx(domain=self.mesh))
-        self.J += alpha * ((self.length * self.height - Vol) - self.Vol0)**2
-     
-        (x, y) = fe.SpatialCoordinate(self.mesh)
-        Bc1 = (self.length**2 * self.height / 2 - da.assemble(x * fe.dx(domain=self.mesh))) / (self.length * self.height - Vol)
-        Bc2 = (self.length * self.height**2 / 2 - da.assemble(y * fe.dx(domain=self.mesh))) / (self.length * self.height - Vol)
-        beta = 1e2
-        self.J += beta * ((Bc1 - self.xcenter)**2 + (Bc2 - self.ycenter)**2)
+        self.update_objective_reg()
 
         if self.problem == 'forward':
-            np.save(f'data/numpy/{self.case_name}/step_{self.opt_step}_u.npy', np.array(self.delta_u_recorded))
-            np.save(f'data/numpy/{self.case_name}/step_{self.opt_step}_f.npy', np.array(self.sigma_recorded))
+            np.save(f'data/numpy/{self.case_name}/step_{self.opt_step}_u.npy', np.array(delta_u_recorded))
+            np.save(f'data/numpy/{self.case_name}/step_{self.opt_step}_f.npy', np.array(sigma_recorded))
+
+        if self.problem == 'debug':
+            self.plot_force_displacement_helper(delta_u_recorded, sigma_recorded)
 
         return float(self.J)
 
@@ -330,7 +279,7 @@ class PDE(object):
             vtkfile_mesh << mesh_copy
             xdmf_file_mesh = fe.XDMFFile(MPI.COMM_WORLD, f'data/xdmf/{self.case_name}/{self.problem}/mesh_{iteration_callback.count}.xdmf')
             xdmf_file_mesh.write(mesh_copy)
-            print(f"BFGS call back...:max h {np.max(np.absolute(x))}")
+            print(f"Optimizer iter call back, max h {np.max(np.absolute(x))}")
 
 
         iteration_callback.count = 0
@@ -339,7 +288,10 @@ class PDE(object):
         vtkfile_mesh = fe.File(f'data/pvd/{self.case_name}/{self.problem}/mesh.pvd')
         vtkfile_mesh << self.mesh
 
-        h_opt = da.minimize(reduced_functional, method="L-BFGS-B", tol=1e-20, bounds=(-2., 2.), callback=iteration_callback,
+        # h_opt = da.minimize(reduced_functional, method="CG", tol=1e-20, callback=iteration_callback,
+        #     options={"disp": True, "maxiter": 2})
+
+        h_opt = da.minimize(reduced_functional, method="L-BFGS-B", tol=1e-20, bounds=(-5., 5.), callback=iteration_callback,
             options={"disp": True, "maxiter": 2})
 
 
@@ -363,18 +315,23 @@ class PDE(object):
         plt.show()
 
 
-    def plot_force_displacement(self):
-        delta_u_recorded = np.load(f'data/numpy/{self.case_name}/step_{self.opt_step}_u.npy')
-        sigma_recorded = np.load(f'data/numpy/{self.case_name}/step_{self.opt_step}_f.npy')
+    def plot_force_displacement_helper(self, delta_u_recorded, sigma_recorded):
         fig = plt.figure(num=self.opt_step)
-        plt.ion()
         plt.plot(delta_u_recorded, sigma_recorded, linestyle='--', marker='o', color='red')
         # plt.legend(fontsize=14)
         plt.tick_params(labelsize=14)
         plt.xlabel("Vertical displacement of top side", fontsize=14)
         plt.ylabel("Force on top side", fontsize=14)
         plt.grid(True)
+        return fig
+
+
+    def plot_force_displacement(self):
+        delta_u_recorded = np.load(f'data/numpy/{self.case_name}/step_{self.opt_step}_u.npy')
+        sigma_recorded = np.load(f'data/numpy/{self.case_name}/step_{self.opt_step}_f.npy')
+        fig = self.plot_force_displacement_helper(delta_u_recorded, sigma_recorded)
         fig.savefig(f'data/pdf/{self.case_name}/step_{self.opt_step}_force_load.pdf', bbox_inches='tight')
+        plt.ion()
         plt.show()
         plt.pause(0.001)
 
@@ -396,29 +353,3 @@ def plot_comparison(case_name):
     fig.savefig(f'data/pdf/{case_name}/cmp_force_load.pdf', bbox_inches='tight')
     plt.show()
 
-
-def main(args):
-    begin_time = time.time()
-    for i in range(3):
-        pde = PDE('debug')
-        pde.run(i)
-    end_time = time.time()
-    if rank == 0:
-        print(f"Wall time elapsed: {end_time-begin_time}")
-
-    # pde = PDE('inverse')
-    # pde.run()
-
-    # for i in range(3):
-    #     pde = PDE('forward')
-    #     pde.run(i)
-
-    # for i in range(3):
-    #     pde = PDE('post-processing')
-    #     pde.run(i)
-
-
-if __name__ == '__main__':
-    args = arguments.args
-    main(args)
-    # plot_comparison('brittle')
