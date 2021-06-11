@@ -141,7 +141,7 @@ class PDECO(object):
 
 
     def staggered_solve(self):
-        self.U = fe.VectorFunctionSpace(self.mesh, 'CG', 1)
+        self.U = fe.VectorFunctionSpace(self.mesh, 'CG', 1, constrained_domain=self.periodic)
         self.W = fe.FunctionSpace(self.mesh, 'CG', 1) 
         self.V = fe.FunctionSpace(self.mesh, 'DG', 0)
 

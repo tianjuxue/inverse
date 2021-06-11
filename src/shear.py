@@ -113,7 +113,7 @@ class Shear(PDECO):
         self.hole = Hole()
         self.periodic = Periodic()
 
-        self.periodic = None
+        # self.periodic = None
 
         self.boundaries = fe.MeshFunction("size_t", self.mesh, self.mesh.topology().dim() - 1)
         self.boundaries.set_all(0)
@@ -164,12 +164,12 @@ class Shear(PDECO):
 def main(args):
     begin_time = time.time()
 
-    # for i in range(1):
-    #     pde = Shear('debug')
-    #     pde.run(i)
+    for i in range(1):
+        pde = Shear('debug')
+        pde.run(i)
 
-    pde = Shear('inverse')
-    pde.run()
+    # pde = Shear('inverse')
+    # pde.run()
 
     # for i in range(3):
     #     pde = Shear('forward')
